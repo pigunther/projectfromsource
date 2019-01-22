@@ -56,6 +56,48 @@ parameter_namespace_t parameter_root, aseba_ns;
 
 static THD_WORKING_AREA(selector_thd_wa, 2048);
 
+void Update_odometer(double *Left_encoder_old, double *Right_encoder_old, double *Theta, double *X_pos_actual, double *Y_pos_actual)
+{
+/*Функция обновляет координаты центра робота и угол его ориентации относительно Ox, используя старые значения счетчиков шагов энкодеров и текущих координат и угла ориентации робота.*/
+
+	double Left_encoder_actual = 0; //Количество шагов на левом колесе [шаги].
+	double Right_encoder_actual = 0; //Количество шагов на правом колесе [шаги].
+	double Left_length = 0; //Расстояние, пройденное левым колесом [м].
+	double Right_length = 0; //Расстояние, пройденное правым колесом [м].
+	double Alpha_odometer = 0; //Угол сегмента окружности при повороте [рад].
+	double Radius_odometer = 0; //Радиус сегмента окружности при повороте [м].
+	double Center_x_odometer = 0, Center_y_odometer = 0; //Координаты центра окружности поворота [м][м].
+
+	Left_encoder_actual = (double)left_motor_get_pos(); //Обновляем данные энкодеров.
+	Right_encoder_actual = (double)right_motor_get_pos(); //Получаем актуальные значения [шаги].
+
+	Right_length = ((Right_encoder_actual - *Right_encoder_old)/1000)*0.1288; //Количество пройденных шагов делим на количество шагов в одном обороте колеса, получаем количество оборотов колеса, умножаем на длину окружности колеса [м].
+	Left_length = ((Left_encoder_actual - *Left_encoder_old)/1000)*0.1288;
+
+	if(Right_length != Left_length) //Если левое и правое колеса прошли не одинаковые расстояния.
+	{
+		Alpha_odometer = (Right_length - Left_length)/0.053; //В радианах. 0.053 - расстояние между колесами [м].
+		Radius_odometer = Left_length/Alpha_odometer;
+
+		Center_x_odometer = *X_pos_actual - (Radius_odometer+0.0265)*sin(*Theta); //0.0265 - полурасстояние между колесами [м].
+		Center_y_odometer = *Y_pos_actual - (Radius_odometer+0.0265)*(-cos(*Theta));
+
+		*Theta = fmod((*Theta+Alpha_odometer+2*M_PI), 2*M_PI);
+
+		*X_pos_actual = Center_x_odometer + (Radius_odometer+0.0265)*sin(*Theta);
+		*Y_pos_actual = Center_y_odometer + (Radius_odometer+0.0265)*(-cos(*Theta));
+	}
+
+	if(Right_length == Left_length) //Если левое и правое колеса прошли  одинаковые расстояния.
+	{
+		*X_pos_actual = *X_pos_actual  + Left_length*cos(*Theta);
+		*Y_pos_actual = *Y_pos_actual + Left_length*sin(*Theta);
+	}
+
+	*Left_encoder_old = (double)left_motor_get_pos(); //Обновляем данные энкодеров.
+	*Right_encoder_old = (double)right_motor_get_pos();
+}
+
 static bool load_config(void)
 {
     extern uint32_t _config_start;
@@ -127,6 +169,10 @@ static THD_FUNCTION(selector_thd, arg)
 	calibrate_acc();
 	calibrate_gyro();
 	calibrate_ir();
+	double Right_encoder_old = (double)right_motor_get_pos();
+	double Left_encoder_old = (double)right_motor_get_pos();
+	double Theta = M_PI/2; //Угол ориентации отн. оси Ox.
+	double X_pos_actual, Y_pos_actual; //Координаты центра робота.
 
     while(stop_loop == 0) {
     	time = chVTGetSystemTime();
@@ -255,25 +301,21 @@ static THD_FUNCTION(selector_thd, arg)
 				break;
 
 			case 5: // Range and bearing - transmitter.
-				switch(rab_state) {
-					case 0:
-						write_reg(rab_addr, 12, 150); // Set range.
-						if((i2c_err = read_reg(rab_addr, 12, &regValue[0])) == MSG_OK) {
-							chprintf((BaseSequentialStream *)&SDU1, "set range to %d\r\n", regValue[0]);
-						}
-						write_reg(rab_addr, 17, 0); // Onboard calculation.
-						if((i2c_err = read_reg(rab_addr, 12, &regValue[0])) == MSG_OK) {
-							chprintf((BaseSequentialStream *)&SDU1, "onboard calculation enabled = %d\r\n", regValue[0]);
-						}
-						write_reg(rab_addr, 16, 0); // Store light conditions.
-						rab_state = 1;
-						break;
+			    //screen /dev/cu.usbmodem301 19200
+			    left_motor_set_speed(150);
 
-					case 1:
-						write_reg(rab_addr, 13, 0xAA);
-						write_reg(rab_addr, 14, 0xFF);
-						break;
+				Right_encoder_old = (double)right_motor_get_pos();
+				Left_encoder_old = (double)right_motor_get_pos();
+
+				Update_odometer(&Left_encoder_old, &Right_encoder_old, &Theta, &X_pos_actual, &Y_pos_actual);
+
+				if (SDU1.config->usbp->state == USB_ACTIVE)
+				{
+                    chprintf((BaseSequentialStream *)&SDU1, "%d", USB_ACTIVE);
+
+                    chprintf((BaseSequentialStream *)&SDU1, "Theta = %8.4lf, X =  %8.4lf, Y =  %8.4lf\r\n", Theta*180/M_PI, X_pos_actual, Y_pos_actual);
 				}
+
 				chThdSleepUntilWindowed(time, time + MS2ST(20)); // Refresh @ 50 Hz.
 				break;
 
